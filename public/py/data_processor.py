@@ -21,7 +21,7 @@ from scientific_qc import PHYSICAL_LIMITS, screen_input_frame
 
 logger = logging.getLogger(__name__)
 
-FLUX_VARS = ("ET", "H", "LE")
+FLUX_VARS = ("ET", "H", "LE", "NEE")
 BIOMET_VARS = ("sr", "at", "vpd", "rh", "ws", "rain", "pa", "lw_in", "rn", "g", "swc")
 CONTINUOUS_BIOMET = ("sr", "at", "vpd", "rh", "ws", "pa", "lw_in", "rn", "g", "swc")
 
@@ -401,6 +401,7 @@ EDDYPRO_COLUMN_CANDIDATES = {
     "LE": ("LE",),
     "H": ("H",),
     "ET": ("ET",),
+    "NEE": ("co2_flux", "NEE", "FC", "FCO2"),
     "sr": ("SWIN_1_1_1", "RG_1_1_1", "SW_IN", "SWIN", "Rg"),
     "at": ("TA_1_1_1", "air_temperature", "TA", "Tair"),
     "rh": ("RH_1_1_1", "RH", "relative_humidity"),
@@ -448,6 +449,12 @@ def _eddypro_unit_to_canonical(variable: str, unit: str) -> tuple[float, float, 
             return 1000.0, 0.0, "mm interval-1"
         if "mm" in compact:
             return 1.0, 0.0, "mm interval-1"
+    if variable == "NEE":
+        if "umol" in compact and "m-2" in compact:
+            return 1.0, 0.0, "umol m-2 s-1"
+        if "mmol" in compact and "m-2" in compact:
+            return 1000.0, 0.0, "umol m-2 s-1"
+        return 1.0, 0.0, "umol m-2 s-1"
     if variable == "ET":
         # EddyPro ET is normally mm h-1. It is retained for comparison only;
         # final ET is derived from the final LE series.
@@ -624,15 +631,18 @@ def read_eddypro_txt(
         out[f"{variable}_source_column"] = source
         out[f"{variable}_original_unfiltered"] = converted
 
-        qc_col = _pick_existing_column(raw, (f"qc_{variable}", f"{variable}_qc")) if variable in {"LE", "H"} else None
+        if variable == "NEE":
+            qc_col = _pick_existing_column(raw, ("qc_co2_flux", "qc_NEE", "NEE_qc", "FC_QC"))
+        else:
+            qc_col = _pick_existing_column(raw, (f"qc_{variable}", f"{variable}_qc")) if variable in {"LE", "H"} else None
         qc_values = pd.to_numeric(raw[qc_col], errors="coerce") if qc_col else pd.Series(np.nan, index=raw.index)
         out[f"{variable}_input_qc"] = qc_values
         qc_ok = qc_values.le(config.maximum_accepted_qc) | qc_values.isna()
-        if variable in {"LE", "H"} and qc_col:
+        if variable in {"LE", "H", "NEE"} and qc_col:
             # EddyPro numeric quality flags are explicit; missing QC is not accepted.
             qc_ok = qc_values.notna() & qc_values.le(config.maximum_accepted_qc)
 
-        lower, upper = PHYSICAL_LIMITS.get(variable, (-np.inf, np.inf))
+        lower, upper = ((-500.0, 500.0) if variable == "NEE" else PHYSICAL_LIMITS.get(variable, (-np.inf, np.inf)))
         physical_ok = converted.between(lower, upper, inclusive="both") | converted.isna()
         not_enough = out["eddypro_not_enough_data"].astype(bool)
         accepted = converted.notna() & qc_ok & physical_ok & ~not_enough
@@ -770,7 +780,7 @@ def read_eddypro_txt(
     regular["datetime_midpoint"] = regular["datetime"]
     regular["datetime_end"] = regular["datetime"] + step / 2
 
-    flux_vars = [v for v in ("LE", "H", "ET") if v in regular and regular[f"{v}_original_unfiltered"].notna().any()]
+    flux_vars = [v for v in ("LE", "H", "ET", "NEE") if v in regular and f"{v}_original_unfiltered" in regular and regular[f"{v}_original_unfiltered"].notna().any()]
     biomet_vars = [v for v in BIOMET_VARS if v in regular and regular[v].notna().any()]
     if "LE" not in flux_vars and "H" not in flux_vars:
         raise ValueError("No usable LE or H columns were found in the EddyPro TXT file.")

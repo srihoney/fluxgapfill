@@ -1,5 +1,17 @@
+FluxGapFill Phase 1 FINAL — Cloudflare Pages
+============================================
+Build: 20260923p1
+
+If you already have the fluxgapfill Pages project:
+1. Replace the GitHub repository contents with this package's contents.
+2. Commit/push to main.
+3. Wait for the Cloudflare production deployment to finish.
+4. Open https://fluxgapfill.pages.dev/deployment-check.html
+5. Confirm it says: Build: 20260923p1
+6. Hard-refresh the main page once if an older browser-cached page appears.
+
 Cloudflare Pages settings
-=========================
+-------------------------
 Project name: fluxgapfill
 Production branch: main
 Framework preset: None
@@ -7,8 +19,10 @@ Build command: exit 0
 Build output directory: public
 Root directory: [blank]
 
-Expected URL if name is available:
+Expected URL:
 https://fluxgapfill.pages.dev/
 
 Deployment check:
 https://fluxgapfill.pages.dev/deployment-check.html
+
+No server-side scientific data storage is required by this package.

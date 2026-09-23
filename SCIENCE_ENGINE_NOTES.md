@@ -1,24 +1,74 @@
-# FluxGapFill science engine notes
+# FluxGapFill Phase 1 — Science / Import Notes
 
-## Implemented in this package
-- EddyPro full-output TXT ingestion with QC screening and timestamp regularization.
-- Optional hourly CIMIS CSV alignment, including ETo, precipitation, solar/net radiation, vapor pressure, air temperature, RH, dew point, wind, wind direction, and soil temperature.
-- Reichstein-style MDS filling.
-- Random Forest and XGBoost candidates with current, tower, and cross-flux profiles.
-- Calendar-blocked validation for 1/7/14/30/60-day outages (user-selectable).
-- Adaptive model selection by the site's blocked-validation RMSE.
-- Full per-record provenance and validation RMSE fields.
-- ET conversion from final LE using temperature-dependent latent heat of vaporization.
+Build: `20260923p1`
 
-## Deliberate choices
-The browser version uses one CPU thread for tree models because it runs inside WebAssembly. The scientific model definitions otherwise follow the v2 candidate engine used in the real-data benchmarking. Measured accepted observations are never overwritten.
+## Scope boundary
 
-Blocked-validation RMSE is kept separate from uncertainty. The exported `*_validation_lower95` / `*_validation_upper95` fields are empirical RMSE-based diagnostic bands, not formal confidence intervals.
+FluxGapFill Phase 1 accepts **processed fluxes and half-hourly/hourly environmental time series**. It deliberately does not calculate EC fluxes from raw high-frequency sonic/IRGA measurements.
 
-## Recommended operating sequence
-1. Load EddyPro + CIMIS.
-2. Review completeness and predictor availability.
-3. Start with 1 validation window per gap duration.
-4. Increase to 2–3 windows for final scientific evaluation.
-5. Enable adaptive selection and create the final product.
-6. Export the validation table and the full provenance CSV together.
+## Universal import foundation
+
+`public/py/universal_import.py` provides:
+
+- format detection for EddyPro, Campbell TOA5, CIMIS, FLUXNET/AmeriFlux-style, generic delimited data and Excel workbooks
+- conservative column-name matching with detection confidence
+- explicit manual mapping fallback
+- timestamp/date/time handling
+- start/end/midpoint timestamp conventions
+- canonical-unit conversion
+- regular time-grid construction
+- physical screens for mapped environmental variables
+- VPD derivation from temperature + RH when VPD is absent
+- alignment of a supplemental environmental file onto the primary project time grid
+- data/module capability checks
+
+Specialized EddyPro and CIMIS parsers remain authoritative for those known formats. Generic mapping is intended for processed logger/manual files, not raw EC processing.
+
+## Canonical project schema
+
+The standardized project may contain:
+
+`datetime, LE, H, NEE, qc_LE, qc_H, qc_NEE, sr, rn, g, at, rh, vpd, ws, wind_dir, rain, pa, swc, soil_temperature_representative, ustar, obukhov_length, sigma_v, ET, ETo, vp, dew_point`
+
+Supplemental environmental inputs are aligned and stored as reference predictors where appropriate (for example `sr_ref`, `rn_ref`, `at_ref`, `vpd_ref`, `eto_ref`).
+
+## EddyPro NEE retention
+
+Phase 1 now retains processed EddyPro CO2 flux as internal `NEE` when present and applies the associated `qc_co2_flux`/equivalent QC flag. This allows the capability engine to recognize datasets suitable for later u* and carbon modules.
+
+## Module readiness
+
+The interface reports required and recommended inputs before a module can proceed. Examples:
+
+- **Gap filling:** a regular timestamp plus at least one of LE/H/NEE; radiation/temperature/VPD recommended
+- **Energy balance:** LE + H + Rn + G
+- **ET analysis:** LE; ETo/rain/SWC recommended
+- **u* analysis:** NEE + u* + air temperature; radiation recommended
+- **Carbon partitioning:** NEE + air temperature; u* and radiation recommended
+- **Footprint:** u* + wind direction + Monin–Obukhov length + measurement height; sigma-v/canopy height recommended
+- **Irrigation overlay:** optional irrigation and/or rainfall input
+
+A readiness result is not a claim that the future-phase scientific calculation has already been implemented. Phase 1 establishes the capability-aware input workflow.
+
+## Retained gap-filling engine
+
+The package continues to include:
+
+- Reichstein-style MDS filling
+- RF/XGBoost candidate models
+- current/tower/cross-flux predictor profiles
+- artificial contiguous calendar-gap validation
+- adaptive model selection by validated gap duration
+- provenance fields
+- validation RMSE diagnostics
+- LE-to-ET conversion
+
+Measured/QC-accepted target observations are not overwritten by the gap-filling stage.
+
+## Validation / uncertainty terminology
+
+Blocked-validation RMSE is kept separate from formal uncertainty. Any RMSE-derived diagnostic bands should not be interpreted as statistically calibrated 95% prediction intervals unless a later phase explicitly implements and validates interval calibration.
+
+## Local processing
+
+The browser runtime is Pyodide running inside an ES-module Web Worker. User scientific files are copied to Pyodide's temporary browser filesystem for the current session; the web application does not upload them to a scientific processing server.

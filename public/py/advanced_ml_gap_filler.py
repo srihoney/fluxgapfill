@@ -30,7 +30,7 @@ TOWER_FEATURES = (
     "soil_temperature_representative", "wind_dir",
 )
 EXTERNAL_REF_FEATURES = (
-    "eto_ref", "rain_ref", "sr_ref", "rn_ref", "vp_ref", "at_ref", "rh_ref",
+    "eto_ref", "rain_ref", "sr_ref", "rn_ref", "vp_ref", "vpd_ref", "pa_ref", "at_ref", "rh_ref",
     "dew_ref", "ws_ref", "wind_dir_ref", "soil_temp_ref",
 )
 

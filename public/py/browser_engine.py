@@ -11,8 +11,9 @@ from gap_filler import gap_run_information, mds_gap_fill
 from advanced_ml_gap_filler import (
     fit_candidate_model, predict_candidate, calendar_validation_windows, score_prediction
 )
+from universal_import import inspect_file, read_mapped_file, align_supplemental, capabilities, project_schema
 
-STATE: Dict[str, object] = {"data": None, "metadata": None, "benchmark": None, "filled": None}
+STATE: Dict[str, object] = {"data": None, "metadata": None, "benchmark": None, "filled": None, "project": None, "inspection": {}}
 
 
 def _emit(kind: str, **payload):
@@ -87,61 +88,146 @@ def _downsample(data: pd.DataFrame, columns: List[str], limit: int = 2200):
     return out
 
 
-def load_project(ec_path: str, cimis_path: str | None = None, maximum_qc: float = 1.0):
-    _emit('progress', value=5, message='Reading EddyPro file')
-    config = InputProcessingConfig(maximum_accepted_qc=float(maximum_qc), timestamp_convention='end')
-    data, flux_vars, biomet_vars, metadata = read_eddypro_txt(ec_path, processing_config=config)
-    data = data.reset_index(drop=True)
+def inspect_input(path: str, kind: str = "primary"):
+    """Inspect a user-selected file without committing it to the project."""
+    result = inspect_file(path, kind=kind)
+    STATE.setdefault('inspection', {})[kind] = result
+    return _j(result)
 
-    cimis_info = None
-    if cimis_path:
-        _emit('progress', value=35, message='Aligning CIMIS reference data')
-        ext, ranking, inventory = retrieve_external_reference(
-            data,
-            SiteConfig(latitude=0.0, longitude=0.0),
-            ExternalSourceConfig(cimis_local_path=cimis_path),
-        )
-        for col in ext.columns:
-            if col != 'datetime':
-                data[col] = ext[col].to_numpy()
-        cimis_info = {
-            "station": ext.attrs.get('selected_station'),
-            "inventory": inventory.to_dict(orient='records'),
-            "ranking": ranking.head(10).to_dict(orient='records'),
-        }
 
-    _emit('progress', value=65, message='Computing data-quality diagnostics')
+def import_schema():
+    return _j(project_schema())
+
+
+def _summary_from_data(data: pd.DataFrame, *, source_info: dict, external_info: dict | None, project_meta: dict, flux_vars=None, biomet_vars=None) -> dict:
     dt = pd.to_datetime(data['datetime'])
     step = infer_timestep(dt)
     summary = {
         "records": int(len(data)),
-        "start": str(dt.min()),
-        "end": str(dt.max()),
+        "start": str(dt.min()), "end": str(dt.max()),
         "timestep_minutes": float(step / pd.Timedelta(minutes=1)),
-        "flux_variables": list(flux_vars),
-        "biomet_variables": list(biomet_vars),
-        "cimis": cimis_info,
+        "flux_variables": list(flux_vars or [x for x in ('LE','H','NEE') if x in data and pd.to_numeric(data[x],errors='coerce').notna().any()]),
+        "biomet_variables": list(biomet_vars or [x for x in ('sr','rn','g','at','rh','vpd','ws','wind_dir','rain','pa','swc','soil_temperature_representative','ustar') if x in data]),
+        "source": source_info,
+        "external": external_info,
+        "project": project_meta,
+        "cimis": external_info if external_info and external_info.get('type') == 'CIMIS' else None,
         "LE": _gap_summary(data, 'LE'),
         "H": _gap_summary(data, 'H'),
-        "plot": _downsample(data, ['LE','H','rn','g','sr','vpd','at','swc']),
+        "NEE": _gap_summary(data, 'NEE'),
+        "plot": _downsample(data, ['LE','H','NEE','rn','g','sr','vpd','at','swc']),
     }
-    # Predictor availability for transparent model selection.
     predictor_cols = [
-        'sr','vpd','at','rh','ws','pa','rn','g','swc','soil_temperature_representative','wind_dir',
-        'eto_ref','rain_ref','sr_ref','rn_ref','vp_ref','at_ref','rh_ref','dew_ref','ws_ref','wind_dir_ref','soil_temp_ref'
+        'sr','vpd','at','rh','ws','pa','rn','g','swc','soil_temperature_representative','wind_dir','ustar','obukhov_length','sigma_v',
+        'ETo','ET','rain','vp','dew_point',
+        'eto_ref','rain_ref','sr_ref','rn_ref','vp_ref','vpd_ref','pa_ref','at_ref','rh_ref','dew_ref','ws_ref','wind_dir_ref','soil_temp_ref'
     ]
     avail = []
     for col in predictor_cols:
         if col in data:
-            s = pd.to_numeric(data[col], errors='coerce')
-            avail.append({"variable": col, "available_pct": float(100*s.notna().mean()), "n": int(s.notna().sum())})
+            sval = pd.to_numeric(data[col], errors='coerce')
+            if sval.notna().any():
+                avail.append({"variable": col, "available_pct": float(100*sval.notna().mean()), "n": int(sval.notna().sum())})
     summary['predictors'] = avail
-    STATE['data'] = data
-    STATE['metadata'] = summary
-    STATE['benchmark'] = None
-    STATE['filled'] = None
-    _emit('progress', value=100, message='Dataset ready')
+    summary['capabilities'] = capabilities(data, project_meta)
+    return summary
+
+
+def load_universal_project(primary_path: str, primary_spec_json: str,
+                           supplemental_path: str | None = None, supplemental_spec_json: str | None = None,
+                           project_json: str | None = None):
+    """Load a mapped project from EddyPro, Campbell, FLUXNET, generic, Excel or CIMIS-compatible sources."""
+    primary_spec = json.loads(primary_spec_json) if isinstance(primary_spec_json, str) else dict(primary_spec_json or {})
+    supplemental_spec = json.loads(supplemental_spec_json) if isinstance(supplemental_spec_json, str) and supplemental_spec_json else (dict(supplemental_spec_json or {}) if supplemental_spec_json else None)
+    project = json.loads(project_json) if isinstance(project_json, str) and project_json else dict(project_json or {})
+    primary_fmt = str(primary_spec.get('format') or 'generic')
+    mapping = primary_spec.get('mapping') or {}
+    maximum_qc = float(project.get('maximum_qc', 1.0))
+    timezone = str(project.get('timezone') or 'America/Los_Angeles')
+    time_basis = str(project.get('time_basis') or 'local_standard')
+    convention = str(project.get('timestamp_convention') or primary_spec.get('timestamp_recommendation') or 'midpoint')
+    config = {"maximum_qc":maximum_qc,"timezone":timezone,"time_basis":time_basis,"timestamp_convention":convention}
+
+    if primary_fmt == 'eddypro':
+        _emit('progress', value=5, message='Reading EddyPro full-output file')
+        pcfg = InputProcessingConfig(maximum_accepted_qc=maximum_qc, timezone=timezone, time_basis=time_basis, timestamp_convention='end')
+        data, flux_vars, biomet_vars, pmeta = read_eddypro_txt(primary_path, processing_config=pcfg)
+        data = data.reset_index(drop=True)
+        source_info = {"type":"EddyPro","format":"eddypro","name":Path(primary_path).name,"specialized_parser":True,
+                       "timestamp_convention":"end","timezone":timezone,"time_basis":time_basis,
+                       "rows_regularized":int(len(data))}
+    else:
+        _emit('progress', value=5, message=f"Reading {primary_spec.get('format_label', primary_fmt)}")
+        data, pmeta = read_mapped_file(primary_path, mapping, config, fmt=primary_fmt)
+        flux_vars=[x for x in ('LE','H','NEE') if x in data]
+        biomet_vars=[x for x in ('sr','rn','g','at','rh','vpd','ws','rain','pa','swc','soil_temperature_representative') if x in data]
+        source_info={"type":primary_spec.get('format_label',primary_fmt),"format":primary_fmt,"name":Path(primary_path).name,
+                     "specialized_parser":False,"timestamp_convention":convention,"timezone":timezone,"time_basis":time_basis,
+                     **{k:v for k,v in pmeta.items() if k not in {'audit'}}}
+        source_info['audit']=pmeta.get('audit',[])
+
+    external_info = None
+    if supplemental_path and supplemental_spec:
+        sfmt=str(supplemental_spec.get('format') or 'generic')
+        _emit('progress', value=38, message=f"Aligning supplemental {supplemental_spec.get('format_label', sfmt)} data")
+        if sfmt == 'cimis':
+            ext, ranking, inventory = retrieve_external_reference(
+                data, SiteConfig(latitude=float(project.get('latitude') or 0.0), longitude=float(project.get('longitude') or 0.0)),
+                ExternalSourceConfig(cimis_local_path=supplemental_path),
+            )
+            for col in ext.columns:
+                if col != 'datetime': data[col] = ext[col].to_numpy()
+            external_info={"type":"CIMIS","format":"cimis","name":Path(supplemental_path).name,"station":ext.attrs.get('selected_station'),
+                           "inventory":inventory.to_dict(orient='records'),"ranking":ranking.head(10).to_dict(orient='records')}
+        else:
+            smap=supplemental_spec.get('mapping') or {}
+            sconvention=str(project.get('supplemental_timestamp_convention') or supplemental_spec.get('timestamp_recommendation') or 'midpoint')
+            sconfig={"maximum_qc":maximum_qc,"timezone":timezone,"time_basis":time_basis,"timestamp_convention":sconvention}
+            sup,smeta=read_mapped_file(supplemental_path,smap,sconfig,fmt=sfmt)
+            aligned=align_supplemental(sup,data)
+            rename={
+                'ETo':'eto_ref','rain':'rain_ref','sr':'sr_ref','rn':'rn_ref','vp':'vp_ref','vpd':'vpd_ref','pa':'pa_ref','at':'at_ref','rh':'rh_ref',
+                'dew_point':'dew_ref','ws':'ws_ref','wind_dir':'wind_dir_ref','soil_temperature_representative':'soil_temp_ref'
+            }
+            added=[]
+            for col in aligned.columns:
+                if col=='datetime': continue
+                target=rename.get(col, f'{col}_ref' if col in {'swc','g'} else None)
+                if target:
+                    data[target]=aligned[col].to_numpy(); added.append(target)
+            external_info={"type":supplemental_spec.get('format_label',sfmt),"format":sfmt,"name":Path(supplemental_path).name,
+                           "station":smeta.get('reader_metadata',{}).get('station'),"added_variables":added,"timestep_minutes":smeta.get('timestep_minutes'),
+                           "timestamp_convention":sconvention}
+
+    _emit('progress', value=72, message='Computing project capabilities and data-quality diagnostics')
+    # Mirror primary ETo/rain variables into names used by water-analysis readiness when present.
+    summary=_summary_from_data(data,source_info=source_info,external_info=external_info,project_meta=project,flux_vars=flux_vars,biomet_vars=biomet_vars)
+    STATE['data']=data; STATE['metadata']=summary; STATE['benchmark']=None; STATE['filled']=None; STATE['project']=project
+    _emit('progress', value=100, message='Project dataset ready')
     return _j(summary)
+
+
+def load_project(ec_path: str, cimis_path: str | None = None, maximum_qc: float = 1.0):
+    """Backward-compatible EddyPro+CIMIS entry point."""
+    p=inspect_file(ec_path,'primary')
+    s=inspect_file(cimis_path,'supplemental') if cimis_path else None
+    project={"maximum_qc":float(maximum_qc),"timezone":"America/Los_Angeles","time_basis":"local_standard","timestamp_convention":"end"}
+    return load_universal_project(ec_path, _j(p), cimis_path, _j(s) if s else None, _j(project))
+
+
+def update_project_metadata(project_json: str | None = None):
+    project = json.loads(project_json) if isinstance(project_json, str) and project_json else dict(project_json or {})
+    current = dict(STATE.get('project') or {})
+    current.update(project)
+    STATE['project'] = current
+    data = STATE.get('data')
+    if data is None:
+        return _j([])
+    caps = capabilities(data, current)
+    if isinstance(STATE.get('metadata'), dict):
+        STATE['metadata']['project'] = current
+        STATE['metadata']['capabilities'] = caps
+    return _j(caps)
 
 
 def _candidate_name(algorithm, profile):
