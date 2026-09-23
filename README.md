@@ -57,3 +57,7 @@ Use a recent Chrome, Edge, Firefox, or Safari. Large XGBoost/blocked-validation 
 ## Important scientific note
 
 The app reports blocked-validation RMSE separately from uncertainty. The displayed validation interval fields are derived from empirical blocked-validation RMSE and are not labeled as formal statistical confidence intervals.
+
+
+## v20260922b runtime fix
+Pyodide 314 requires a **module-type Web Worker**. This package uses `new Worker(..., {type: "module"})` and imports `pyodide.mjs`; it no longer uses the unsupported classic-worker `importScripts()` path. Runtime mirrors are retried automatically.
