@@ -1,87 +1,153 @@
-# FluxGapFill — Phase 1 FINAL
+# FluxGapFill — Phase 2 FINAL
 
-**Build:** `20260923p1`  
+**Build:** `20260923p2`  
 **Target site:** `https://fluxgapfill.pages.dev/`
 
-FluxGapFill is a local-first scientific web application for **already-computed fluxes and half-hourly/hourly environmental data**. Phase 1 establishes the Universal Import + Project Foundation while retaining the working MDS/RF/XGBoost gap-filling workflow from the previous release.
+FluxGapFill is a local-first scientific web application for **already-computed fluxes and half-hourly/hourly environmental data**. Phase 2 keeps the Phase 1 Universal Import foundation and adds the full **QC + Gap Filling + Blocked Validation** workspace.
 
 > FluxGapFill does **not** process raw 10–20 Hz sonic/IRGA data into eddy-covariance fluxes. Raw EC processing should be completed in EddyPro or equivalent software first.
 
-## What is included in Phase 1
+## Phase 2 scientific workflow
 
-### Universal Import
+### 1. Universal Import retained from Phase 1
 
-The importer can recognize or guide users through:
+Supported project inputs include:
 
 - EddyPro full-output TXT
 - CIMIS hourly CSV
 - Campbell Scientific TOA5
 - AmeriFlux / FLUXNET-style files
 - generic CSV / TSV / delimited TXT/DAT
-- Excel workbooks (`.xlsx`, `.xls`, `.xlsb`, `.ods`) through `python-calamine` in the browser
-- optional supplemental weather/environmental files in the same supported generic formats
+- Excel-compatible workbooks supported by `python-calamine`
+- optional supplemental environmental/weather files
+- manual variable mapping when automatic detection is uncertain
 
-For standard formats, FluxGapFill auto-detects as much as it can. For custom/manual files, the user receives an explicit **Variable Mapping** screen and can correct columns, units, timestamp convention, and project metadata before processing. The importer never intentionally invents a hidden variable mapping.
+Known formats use specialized parsing where available. Custom files are mapped into one internal schema before any scientific processing.
 
-### Standard internal variables
+### 2. Configurable Phase 2 QC
 
-Phase 1 can standardize common fields including:
+The Quality Control workspace includes:
 
-- LE, H, NEE/CO2 flux and QC flags
-- incoming shortwave radiation, net radiation, soil heat flux
-- air temperature, RH, VPD, vapor pressure, pressure
-- wind speed and direction
-- precipitation
-- soil water content and soil temperature
-- friction velocity (`u*`), Monin–Obukhov length and lateral wind SD when supplied
-- measured ET and reference ETo
+- preservation of the standardized pre-QC values
+- explicit per-record QC reason flags
+- broad physical/range screening
+- editable LE/H/NEE limits
+- optional conservative rolling Hampel-style spike screening
+- configurable spike window and robust-sigma threshold
+- before/after diagnostic plots
+- per-variable QC audit table
+- downloadable QC audit CSV
 
-Common units can be converted to the canonical units used internally. The mapping screen exposes the selected units so users can correct uncertain metadata before processing.
+The additional Phase 2 spike screen is **off by default**. It is optional because aggressive automatic spike removal can reject genuine flux events. EddyPro/source QC already applied during import remains upstream of this layer.
 
-### Capability-aware project workspace
+### 3. Two MDS variants
 
-After import, FluxGapFill checks the standardized dataset and reports whether each module is **Ready**, **Needs data**, or can be **Skipped**. Phase 1 provides readiness checks for:
+Phase 2 exposes:
 
-- gap filling & validation
-- energy balance
-- ET / water analysis
-- u* threshold analysis
-- carbon partitioning
-- footprint analysis
-- irrigation / rainfall overlays
+- `MDS_Reichstein05`
+- `MDS_Vekuri23`
 
-Only gap filling/validation is a fully active scientific analysis module in this Phase 1 package. The other cards establish the required-data workflow for the later phases; they do not falsely claim the later Tovi-like analyses are already implemented.
+The Reichstein-style search hierarchy is retained. The Vekuri23 daytime LUT aggregation separates lower- and higher-radiation donor subsets before combining them; nighttime/fallback behavior is handled separately.
 
-If a module needs site information such as measurement height or canopy height, the user can supply it in that module area. If the user does not need a module, it can be skipped without blocking the rest of the project.
+MDS output keeps:
 
-### Existing gap-filling science retained
+- method/search-window QC
+- donor count
+- donor standard deviation
+- search-window provenance
 
-Phase 1 retains the validated workflow already developed for the project:
+Donor standard deviation is **not** labeled as a calibrated 95% prediction interval.
 
-- EddyPro QC screening and physical screens
-- timestamp normalization to a regular midpoint grid
-- optional CIMIS alignment
-- Reichstein-style MDS
-- Random Forest candidate models
-- XGBoost candidate models
-- current/tower/cross-flux predictor profiles
-- contiguous calendar-gap validation
-- adaptive method selection from validation results
-- per-record provenance
-- LE-to-ET conversion
-- compact/full CSV exports and validation export
+### 4. Expanded Random Forest and XGBoost candidates
 
-## Included example files
+For LE/H/NEE where predictors are available, Phase 2 can benchmark:
 
-`public/examples/` contains synthetic demonstration files so Universal Import can be tested without requiring additional field datasets:
+- `RF_external`
+- `RF_tower`
+- `RF_cross`
+- `XGB_external`
+- `XGB_tower`
+- `XGB_cross`
 
-- `campbell_toa5_example.dat`
-- `fluxnet_style_example.csv`
-- `generic_manual_example.csv`
-- `generic_manual_example.xlsx`
-- `supplemental_weather_example.csv`
+The profiles distinguish external-reference predictors, tower/environmental predictors, and optional complementary-flux information. The adaptive filler checks whether the driver regime required by a candidate is actually available inside a real gap before selecting that model.
 
-These examples are synthetic demonstration data and are not field observations.
+Target-derived variables are not used as hidden predictors of the same target. In particular, EddyPro ET is not used to predict LE.
+
+### 5. Contiguous blocked validation
+
+Validation uses artificial **calendar outages**, not random-row cross-validation. Default selectable durations are:
+
+`1, 3, 7, 14, 30, 60 days`
+
+The validator:
+
+- masks contiguous calendar windows
+- scores only target observations that were genuinely present before masking
+- supports multiple separated windows per gap duration
+- does not require every record inside the calendar block to have been originally observed
+- reports prediction coverage, RMSE, MAE, bias and R²
+- reports day/night diagnostics
+- reports seasonal diagnostics (DJF/MAM/JJA/SON)
+- stores held-out residual distributions for empirical reconstruction intervals
+
+Validation intensity choices are available in the interface. **Quick (1 window per duration)** is the default for browser practicality; stronger settings take longer.
+
+### 6. Adaptive model selection and provenance
+
+After validation, Adaptive Fill can select a validated candidate by target and nearest tested gap duration, subject to actual predictor availability inside each real gap.
+
+For each target, exported provenance can include:
+
+- original value
+- filled value
+- source/model
+- method detail
+- gap ID
+- gap length
+- gap-risk class
+- MDS fill QC when MDS is used
+- MDS donor SD/count/window
+- validation RMSE associated with the selected candidate
+- empirical 95% residual interval when enough held-out residuals are available
+
+Measured/QC-accepted target records are never overwritten by the gap-filling stage.
+
+### 7. Gap-duration classes
+
+Phase 2 classifies gaps as:
+
+- A: ≤1 day
+- B: >1–3 days
+- C: >3–7 days
+- D: >7–14 days
+- E: >14–30 days
+- F: >30–60 days
+- G: >60–90 days
+- H: >90 days
+
+This is kept separate from canonical MDS method/search-window quality.
+
+### 8. Export package
+
+The browser can export:
+
+- compact results CSV
+- full provenance CSV
+- standardized/QC dataset CSV
+- QC audit CSV
+- validation-detail CSV
+- validation-summary CSV
+- day/night + seasonal diagnostics CSV
+- empirical interval-calibration CSV
+- reproducible validation report in Markdown
+
+LE-to-ET conversion and daily ET summaries are retained for continuity; the full Energy + Water/ET analysis workspace belongs to Phase 3.
+
+## Important validation interpretation
+
+The site-specific blocked-validation windows serve two purposes in the current Phase 2 workflow: **model selection** and **empirical residual calibration**. Therefore the displayed validation performance is a reconstruction/selection diagnostic, not an independent untouched final test set. A separate nested/holdout evaluation is appropriate when an unbiased final comparative performance estimate is required for a publication.
+
+RF/XGBoost reconstruction also uses observations available before and after an artificial gap. This is appropriate for post-processing/gap reconstruction of a completed record and should not be described as forecasting future fluxes.
 
 ## Privacy and file lifecycle
 
@@ -89,18 +155,18 @@ Scientific files are processed **locally in the visitor's browser**.
 
 - no scientific-file upload API
 - no application database
-- no Cloudflare storage of the user's EC/weather files
+- no Cloudflare storage of the user's flux/weather files
 - no GitHub storage of user-selected scientific files
-- temporary copies exist only in the browser/Pyodide runtime during the page session
-- closing/reloading the page clears application runtime state
-- original files on the user's computer are not modified
-- exported files are saved by the user's browser to the user's chosen/default download location
+- temporary files and model state live only in the browser/Pyodide session
+- refreshing/closing the page clears application runtime state
+- original input files are not modified
+- downloaded exports remain on the user's computer
 
 ## Cloudflare Pages deployment
 
-If the existing `fluxgapfill` Pages project is already connected to GitHub, replace the repository contents with the contents of this package and commit/push to `main`.
+For the existing `fluxgapfill` Pages project, replace the GitHub repository contents with the contents of this package and commit/push to `main`.
 
-For a new Pages deployment use:
+Cloudflare Pages settings:
 
 - **Project name:** `fluxgapfill`
 - **Production branch:** `main`
@@ -109,42 +175,28 @@ For a new Pages deployment use:
 - **Build output directory:** `public`
 - **Root directory:** leave blank
 
-Expected site URL, if the project name belongs to your account:
-
-`https://fluxgapfill.pages.dev/`
-
 After deployment open:
 
 `https://fluxgapfill.pages.dev/deployment-check.html`
 
 It must report:
 
-`Build: 20260923p1`
+`Build: 20260923p2`
 
-If an older build appears, wait for the GitHub deployment to finish and then hard-refresh the browser once.
+If an older build appears, wait for the production deployment to finish and hard-refresh the browser once.
 
 ## Browser runtime
 
-The application uses a **module-type Web Worker** and Pyodide 314.0.x. This avoids the classic-worker `importScripts()` incompatibility encountered in the earlier package.
+The application uses a module-type Web Worker with Pyodide 314.x and browser-side NumPy, pandas, SciPy, scikit-learn, XGBoost, timezone support and `python-calamine`. Scientific computation therefore occurs on the user's CPU/RAM rather than on a PythonAnywhere-style application worker.
 
-The worker loads the scientific stack locally in the browser, including NumPy, pandas, SciPy, scikit-learn, XGBoost, timezone data, and `python-calamine` for Excel import. Initial startup can take longer because the browser must download the scientific runtime; subsequent visits are normally faster due to browser caching.
-
-Large blocked-validation/model-training runs are limited primarily by the user's CPU/RAM rather than a PythonAnywhere-style server execution timeout. Do not close/reload the tab while a calculation is running.
-
-## Recommended first test after deployment
-
-1. Confirm `deployment-check.html` shows `20260923p1`.
-2. Open the main app and wait for **Python + XGBoost ready**.
-3. Try one of the files under **Built-in examples**.
-4. Inspect the detected format and variable mapping.
-5. Process the mapped project.
-6. Review the Module Readiness cards.
-7. For a real EddyPro project, upload EddyPro as the primary file and CIMIS as the optional supplemental file.
+Comprehensive blocked validation can involve many model fits. Start with **Quick** validation to verify the project, then use Balanced/Strong/Comprehensive only when the additional validation depth is useful.
 
 ## Phase status
 
-- **Phase 1:** Universal Import + Project Foundation — **included in this package**
-- **Phase 2:** QC + Gap Filling + Validation expansion — planned
-- **Phase 3:** Energy + Water / ET analysis — planned
-- **Phase 4:** Carbon + u* + Footprint — planned
+- **Phase 1:** Universal Import + Project Foundation — included
+- **Phase 2:** QC + Gap Filling + Validation — **included in this package**
+- **Phase 3:** Energy + Water / ET analysis — not yet implemented as a full module
+- **Phase 4:** Carbon + u* + Footprint — not yet implemented as full modules
 - **Phase 5:** Full integration, hardening and production release — planned
+
+The Phase 3/4 readiness cards remain capability-aware input guides. They do not claim those later scientific analyses are already active.

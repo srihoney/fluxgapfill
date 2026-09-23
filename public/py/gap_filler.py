@@ -166,6 +166,7 @@ def mds_gap_fill(
     predictors: Sequence[str] = ("sr", "vpd", "at"),
     tolerances: Optional[Mapping[str, float]] = None,
     max_gap_days: float = 90.0,
+    method: str = "Reichstein05",
     progress_callback: ProgressCallback = None,
 ) -> pd.DataFrame:
     """Fill eligible missing target records using MDS only.
@@ -178,6 +179,9 @@ def mds_gap_fill(
         raise ValueError(f"Target {target!r} is absent.")
     if max_gap_days <= 0:
         raise ValueError("max_gap_days must be positive.")
+    mds_variant = str(method or "Reichstein05").strip()
+    if mds_variant not in {"Reichstein05", "Vekuri23"}:
+        raise ValueError("MDS method must be Reichstein05 or Vekuri23.")
 
     # Work on a narrow frame. Returning/copying the full multi-year provenance
     # table for every target causes severe memory pressure after earlier target
@@ -295,15 +299,14 @@ def mds_gap_fill(
             f"{target}_fill_method": method,
             f"{target}_fill_qc": qc,
             f"{target}_fill_n": n_donors,
-            f"{target}_fill_uncertainty": uncertainty,
-            f"{target}_fill_lower95": filled - 1.96 * uncertainty,
-            f"{target}_fill_upper95": filled + 1.96 * uncertainty,
+            f"{target}_fill_donor_sd": uncertainty,
+            f"{target}_fill_uncertainty": uncertainty,  # backward-compatible donor SD alias
             f"{target}_fill_window_days": window,
             f"{target}_gap_id": gap_info["gap_id"].to_numpy(),
             f"{target}_gap_length_steps": gap_info["gap_length_steps"].to_numpy(),
             f"{target}_gap_length_days": gap_info["gap_length_days"].to_numpy(),
             f"{target}_source": np.where(np.isfinite(original), "measured",
-                                         np.where(np.isfinite(filled), "MDS_gapfilled", "unfilled")),
+                                         np.where(np.isfinite(filled), f"MDS_{mds_variant}_gapfilled", "unfilled")),
         })
         return pd.concat([df.reset_index(drop=True), additions], axis=1).copy()
 
@@ -337,15 +340,29 @@ def mds_gap_fill(
         donors = original[sl][local_measured]
         if donors.size < 2:
             return None
+        # REddyProc Vekuri23 variant: during daytime, separately average donor
+        # fluxes whose incoming shortwave radiation is <= versus > the target
+        # radiation, then average those two means. At night (<10 W m-2) or if
+        # either side is absent, fall back to the Reichstein05 donor mean.
+        fill_value = float(np.mean(donors))
+        if mds_variant == "Vekuri23" and names and names[0] == "sr":
+            sr_local = drivers["sr"][sl][local_measured]
+            target_sr = float(drivers["sr"][idx])
+            if np.isfinite(target_sr) and target_sr >= 10.0:
+                lower = donors[sr_local <= target_sr]
+                higher = donors[sr_local > target_sr]
+                if lower.size >= 1 and higher.size >= 1:
+                    fill_value = float((np.mean(lower) + np.mean(higher)) / 2.0)
         full_window = float(2 * half_window)
+        prefix = f"MDS_{mds_variant}"
         if len(names) == 3:
-            meth = "MDS_LUT_SWIN_VPD_TA"
+            meth = prefix + "_LUT_SWIN_VPD_TA"
             q = 1 if full_window <= 14 else 2 if full_window <= 56 else 3
         else:
-            meth = "MDS_LUT_SWIN"
+            meth = prefix + "_LUT_SWIN"
             q = 1 if full_window <= 14 else 2 if full_window <= 28 else 3
         q = max(q, min(int(dq), 3))
-        return (float(np.mean(donors)), meth, q, int(donors.size),
+        return (fill_value, meth, q, int(donors.size),
                 float(np.std(donors, ddof=1)), full_window)
 
     def _mdc(idx: int, half_window: float):
@@ -359,7 +376,7 @@ def mds_gap_fill(
             return None
         full_window = float(2 * half_window + 1)
         q = 1 if full_window <= 1 else 2 if full_window <= 5 else 3
-        return (float(np.mean(donors)), "MDS_MDC", q, int(donors.size),
+        return (float(np.mean(donors)), f"MDS_{mds_variant}_MDC", q, int(donors.size),
                 float(np.std(donors, ddof=1)), full_window)
 
     total_candidates = int(candidate_indices.size)
@@ -407,10 +424,10 @@ def mds_gap_fill(
             continue
 
         value, meth, q, ndon, unc, win = result
-        gap_qc = 1 if gap_days <= 1 else 2 if gap_days <= 14 else 3
         filled[idx] = value
         method[idx] = meth
-        qc[idx] = max(q, gap_qc)
+        # Keep the canonical MDS method/window quality separate from gap length.
+        qc[idx] = q
         n_donors[idx] = ndon
         uncertainty[idx] = unc
         window[idx] = win
@@ -424,15 +441,14 @@ def mds_gap_fill(
         f"{target}_fill_method": method,
         f"{target}_fill_qc": qc,
         f"{target}_fill_n": n_donors,
-        f"{target}_fill_uncertainty": uncertainty,
-        f"{target}_fill_lower95": filled - 1.96 * uncertainty,
-        f"{target}_fill_upper95": filled + 1.96 * uncertainty,
+        f"{target}_fill_donor_sd": uncertainty,
+        f"{target}_fill_uncertainty": uncertainty,  # backward-compatible donor SD alias
         f"{target}_fill_window_days": window,
         f"{target}_gap_id": gap_info["gap_id"].to_numpy(),
         f"{target}_gap_length_steps": gap_info["gap_length_steps"].to_numpy(),
         f"{target}_gap_length_days": gap_info["gap_length_days"].to_numpy(),
         f"{target}_source": np.where(np.isfinite(original), "measured",
-                                     np.where(np.isfinite(filled), "MDS_gapfilled", "unfilled")),
+                                     np.where(np.isfinite(filled), f"MDS_{mds_variant}_gapfilled", "unfilled")),
     })
     return pd.concat([df.reset_index(drop=True), additions], axis=1).copy()
 

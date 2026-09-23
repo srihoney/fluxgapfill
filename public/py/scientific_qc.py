@@ -15,6 +15,7 @@ import pandas as pd
 EXPECTED_UNITS: Dict[str, str] = {
     "LE": "W m-2",
     "H": "W m-2",
+    "NEE": "umol m-2 s-1",
     "ET": "mm interval-1",
     "sr": "W m-2",
     "rn": "W m-2",
@@ -34,6 +35,7 @@ EXPECTED_UNITS: Dict[str, str] = {
 PHYSICAL_LIMITS: Dict[str, Tuple[float, float]] = {
     "LE": (-1000.0, 1500.0),
     "H": (-1000.0, 1500.0),
+    "NEE": (-200.0, 200.0),
     "ET": (-2.0, 5.0),
     "sr": (-20.0, 1500.0),
     "rn": (-600.0, 1200.0),
@@ -77,6 +79,7 @@ def convert_units(values: pd.Series, variable: str, unit: Optional[str]) -> Tupl
     canonical_keys = {
         "LE": {"wm-2", "wm2", "wattm-2", "wattsm-2"},
         "H": {"wm-2", "wm2", "wattm-2", "wattsm-2"},
+        "NEE": {"umolm-2s-1", "µmolm-2s-1", "umolm2s1"},
         "sr": {"wm-2", "wm2", "wattm-2", "wattsm-2"},
         "rn": {"wm-2", "wm2", "wattm-2", "wattsm-2"},
         "g": {"wm-2", "wm2", "wattm-2", "wattsm-2"},

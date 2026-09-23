@@ -1,7 +1,7 @@
 """Advanced RF/XGBoost candidates for retrospective eddy-covariance gap filling.
 
-This module is deliberately separate from the production MDS/RF implementation.
-It is intended for scientific benchmarking before the web application is changed.
+This module provides the Phase-2 enhanced RF/XGBoost candidates used by the browser engine.
+It is designed for retrospective gap reconstruction with blocked validation.
 
 Design principles
 -----------------
@@ -27,7 +27,8 @@ from gap_filler import gap_run_information
 CURRENT_RF_FEATURES = ("sr", "vpd", "at", "rh", "ws", "pa")
 TOWER_FEATURES = (
     "sr", "vpd", "at", "rh", "ws", "pa", "rn", "g", "swc",
-    "soil_temperature_representative", "wind_dir",
+    "soil_temperature_representative", "wind_dir", "ustar", "obukhov_length",
+    "sigma_v", "rain", "vp", "dew_point", "ETo",
 )
 EXTERNAL_REF_FEATURES = (
     "eto_ref", "rain_ref", "sr_ref", "rn_ref", "vp_ref", "vpd_ref", "pa_ref", "at_ref", "rh_ref",
@@ -104,6 +105,8 @@ def build_advanced_features(
 
     f = pd.DataFrame(index=data.index)
     _add_cyclic_time_features(f, dt)
+    # Day/night regime is useful for LE/H while remaining available through long gaps.
+    f["clock_day"] = ((dt.dt.hour >= 6) & (dt.dt.hour < 18)).astype("int8")
 
     if profile == "current":
         for name in CURRENT_RF_FEATURES:
@@ -145,6 +148,13 @@ def build_advanced_features(
             f["available_energy"] = f["rn"] - f["g"]
         if "sr" in f and "vpd" in f:
             f["sr_x_vpd"] = f["sr"] * f["vpd"]
+        if "at" in f and "vpd" in f:
+            f["at_x_vpd"] = f["at"] * f["vpd"]
+        if "rn" in f and "sr" in f:
+            denom = f["sr"].abs().clip(lower=20.0)
+            f["rn_to_sr"] = f["rn"] / denom
+        if "swc" in f and "vpd" in f:
+            f["swc_x_vpd"] = f["swc"] * f["vpd"]
 
     if "sr_ref" in f and "vpd_ref_derived" in f:
         f["sr_ref_x_vpd"] = f["sr_ref"] * f["vpd_ref_derived"]
@@ -223,7 +233,7 @@ def fit_candidate_model(
             )
         else:
             model = RandomForestRegressor(
-                n_estimators=300, max_depth=24, min_samples_leaf=2,
+                n_estimators=220, max_depth=24, min_samples_leaf=2,
                 max_features=0.70, max_samples=0.90, bootstrap=True,
                 n_jobs=1, random_state=random_state,
             )
@@ -233,7 +243,7 @@ def fit_candidate_model(
         except ImportError as exc:
             raise ImportError("XGBoost candidate requires the xgboost package") from exc
         model = XGBRegressor(
-            n_estimators=650, max_depth=6, learning_rate=0.035,
+            n_estimators=500, max_depth=6, learning_rate=0.04,
             min_child_weight=4, subsample=0.85, colsample_bytree=0.85,
             reg_lambda=7.0, reg_alpha=0.05, objective="reg:squarederror",
             tree_method="hist", n_jobs=1, random_state=random_state,
