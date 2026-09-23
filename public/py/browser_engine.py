@@ -12,8 +12,10 @@ from advanced_ml_gap_filler import fit_candidate_model, predict_candidate
 from phase2_qc import apply_phase2_qc
 from validation_engine import run_blocked_validation, gap_class
 from universal_import import inspect_file, read_mapped_file, align_supplemental, capabilities, project_schema
+from phase3_energy_water import run_phase3_analysis, report_markdown
+from phase4_carbon_footprint import run_phase4_analysis, phase4_report
 
-STATE: Dict[str, object] = {"data": None, "data_imported": None, "metadata": None, "benchmark": None, "filled": None, "project": None, "inspection": {}, "qc_audit": None, "qc_summary": None}
+STATE: Dict[str, object] = {"data": None, "data_imported": None, "metadata": None, "benchmark": None, "filled": None, "project": None, "inspection": {}, "qc_audit": None, "qc_summary": None, "phase3": None, "phase4": None, "phase4_geojson": None}
 
 
 def _emit(kind: str, **payload):
@@ -119,8 +121,8 @@ def _summary_from_data(data: pd.DataFrame, *, source_info: dict, external_info: 
     }
     predictor_cols = [
         'sr','vpd','at','rh','ws','pa','rn','g','swc','soil_temperature_representative','wind_dir','ustar','obukhov_length','sigma_v',
-        'ETo','ET','rain','vp','dew_point',
-        'eto_ref','rain_ref','sr_ref','rn_ref','vp_ref','vpd_ref','pa_ref','at_ref','rh_ref','dew_ref','ws_ref','wind_dir_ref','soil_temp_ref'
+        'ETo','ET','rain','irrigation','pbl_height','wstar','vp','dew_point',
+        'eto_ref','rain_ref','irrigation_ref','sr_ref','rn_ref','vp_ref','vpd_ref','pa_ref','at_ref','rh_ref','dew_ref','ws_ref','wind_dir_ref','soil_temp_ref'
     ]
     avail = []
     for col in predictor_cols:
@@ -160,7 +162,7 @@ def load_universal_project(primary_path: str, primary_spec_json: str,
         _emit('progress', value=5, message=f"Reading {primary_spec.get('format_label', primary_fmt)}")
         data, pmeta = read_mapped_file(primary_path, mapping, config, fmt=primary_fmt)
         flux_vars=[x for x in ('LE','H','NEE') if x in data]
-        biomet_vars=[x for x in ('sr','rn','g','at','rh','vpd','ws','rain','pa','swc','soil_temperature_representative') if x in data]
+        biomet_vars=[x for x in ('sr','rn','g','at','rh','vpd','ws','rain','irrigation','pa','swc','soil_temperature_representative','pbl_height','wstar') if x in data]
         source_info={"type":primary_spec.get('format_label',primary_fmt),"format":primary_fmt,"name":Path(primary_path).name,
                      "specialized_parser":False,"timestamp_convention":convention,"timezone":timezone,"time_basis":time_basis,
                      **{k:v for k,v in pmeta.items() if k not in {'audit'}}}
@@ -186,7 +188,7 @@ def load_universal_project(primary_path: str, primary_spec_json: str,
             sup,smeta=read_mapped_file(supplemental_path,smap,sconfig,fmt=sfmt)
             aligned=align_supplemental(sup,data)
             rename={
-                'ETo':'eto_ref','rain':'rain_ref','sr':'sr_ref','rn':'rn_ref','vp':'vp_ref','vpd':'vpd_ref','pa':'pa_ref','at':'at_ref','rh':'rh_ref',
+                'ETo':'eto_ref','rain':'rain_ref','irrigation':'irrigation_ref','pbl_height':'pbl_height','wstar':'wstar','sr':'sr_ref','rn':'rn_ref','vp':'vp_ref','vpd':'vpd_ref','pa':'pa_ref','at':'at_ref','rh':'rh_ref',
                 'dew_point':'dew_ref','ws':'ws_ref','wind_dir':'wind_dir_ref','soil_temperature_representative':'soil_temp_ref'
             }
             added=[]
@@ -202,7 +204,7 @@ def load_universal_project(primary_path: str, primary_spec_json: str,
     _emit('progress', value=72, message='Computing project capabilities and data-quality diagnostics')
     # Mirror primary ETo/rain variables into names used by water-analysis readiness when present.
     summary=_summary_from_data(data,source_info=source_info,external_info=external_info,project_meta=project,flux_vars=flux_vars,biomet_vars=biomet_vars)
-    STATE['data_imported']=data.copy(); STATE['data']=data.copy(); STATE['metadata']=summary; STATE['benchmark']=None; STATE['filled']=None; STATE['project']=project; STATE['qc_audit']=None; STATE['qc_summary']=None
+    STATE['data_imported']=data.copy(); STATE['data']=data.copy(); STATE['metadata']=summary; STATE['benchmark']=None; STATE['filled']=None; STATE['project']=project; STATE['qc_audit']=None; STATE['qc_summary']=None; STATE['phase3']=None
     _emit('progress', value=100, message='Project dataset ready')
     return _j(summary)
 
@@ -236,13 +238,14 @@ def run_qc(config_json: str | None = None):
     if base is None:
         raise RuntimeError('Load a dataset first.')
     config = json.loads(config_json) if isinstance(config_json, str) and config_json else dict(config_json or {})
-    _emit('progress', value=10, message='Applying Phase-2 range and robust spike screening')
+    _emit('progress', value=10, message='Applying quality-control range and robust spike screening')
     screened, audit, qc_summary = apply_phase2_qc(base, config)
     STATE['data'] = screened
     STATE['qc_audit'] = audit
     STATE['qc_summary'] = qc_summary
     STATE['benchmark'] = None
     STATE['filled'] = None
+    STATE['phase3'] = None
     old = STATE.get('metadata') or {}
     summary = _summary_from_data(
         screened,
@@ -462,6 +465,8 @@ def run_gap_fill(targets_json='["LE","H"]', mode='adaptive', fixed_model='XGB_cr
         daily = daily.rename(columns={'_day':'date','ET_from_LE_mm_interval':'ET_mm_day'})
 
     STATE['filled'] = out
+    STATE['phase3'] = None
+    STATE['phase4'] = None
     gap_class_counts = {}
     for t in targets:
         if f'{t}_gap_class' in out and f'{t}_source' in out:
@@ -479,6 +484,170 @@ def run_gap_fill(targets_json='["LE","H"]', mode='adaptive', fixed_model='XGB_cr
     _emit('progress', value=100, message='Gap filling complete')
     return _j(result)
 
+
+
+def add_water_input_file(path: str, spec_json: str, timestamp_convention: str = 'end'):
+    """Add an optional irrigation/water-input table after the main project is loaded."""
+    base = STATE.get('data_imported')
+    if base is None:
+        raise RuntimeError('Load the primary project before adding a water-input file.')
+    spec = json.loads(spec_json) if isinstance(spec_json, str) else dict(spec_json or {})
+    project = STATE.get('project') or {}
+    mapping = spec.get('mapping') or {}
+    date_only = bool((mapping.get('date') or {}).get('column')) and not bool((mapping.get('time') or {}).get('column')) and not bool((mapping.get('timestamp') or {}).get('column'))
+    cfg = {
+        'maximum_qc': float(project.get('maximum_qc', 1.0)),
+        'timezone': str(project.get('timezone') or 'America/Los_Angeles'),
+        'time_basis': str(project.get('time_basis') or 'local_standard'),
+        # A date-only daily total belongs to that calendar day; midpoint avoids
+        # shifting it across day boundaries regardless of the UI default.
+        'timestamp_convention': 'midpoint' if date_only else str(timestamp_convention or spec.get('timestamp_recommendation') or 'end'),
+        'allow_long_timestep': True,
+    }
+    src, meta = read_mapped_file(path, mapping, cfg, fmt=str(spec.get('format') or 'generic'))
+    aligned = align_supplemental(src, base)
+    # Daily water-total files are common. For source intervals >=20 h, allocate
+    # each daily total only across target intervals belonging to that same date
+    # rather than using nearest-neighbor alignment across day boundaries.
+    try:
+        src_step=infer_timestep(pd.to_datetime(src['datetime']))
+    except Exception:
+        st=pd.DatetimeIndex(pd.to_datetime(src['datetime'])).dropna().sort_values().unique()
+        diffs=pd.Series(st[1:]-st[:-1]); diffs=diffs[diffs>pd.Timedelta(0)]
+        src_step=(diffs.mode().iloc[0] if not diffs.empty and not diffs.mode().empty else (diffs.median() if not diffs.empty else pd.Timedelta(0)))
+    if src_step >= pd.Timedelta(hours=20):
+        target_day=pd.to_datetime(base['datetime']).dt.floor('D')
+        src_day=pd.to_datetime(src['datetime']).dt.floor('D')
+        for total_col in ('irrigation','rain','ETo'):
+            if total_col not in src: continue
+            daily_src=pd.DataFrame({'day':src_day,'v':pd.to_numeric(src[total_col],errors='coerce')}).groupby('day')['v'].sum(min_count=1)
+            arr=np.full(len(base),np.nan)
+            for day,val in daily_src.items():
+                if not np.isfinite(val): continue
+                mask=target_day.eq(day); n=int(mask.sum())
+                if n: arr[mask.to_numpy()]=float(val)/n
+            aligned[total_col]=arr
+    added=[]
+    rename={'irrigation':'irrigation_ref','rain':'rain_water_ref','ETo':'eto_water_ref','swc':'swc_water_ref'}
+    for col,target in rename.items():
+        if col in aligned and pd.to_numeric(aligned[col],errors='coerce').notna().any():
+            for state_key in ('data_imported','data','filled'):
+                frame=STATE.get(state_key)
+                if frame is not None:
+                    frame[target]=pd.to_numeric(aligned[col],errors='coerce').to_numpy()
+            added.append(target)
+    # Phase-3 conventions: irrigation_ref always points to optional applied-water input;
+    # only use water-file rain/ETo as general references when not already supplied.
+    for state_key in ('data_imported','data','filled'):
+        frame=STATE.get(state_key)
+        if frame is None: continue
+        if 'rain_water_ref' in frame and ('rain_ref' not in frame or pd.to_numeric(frame['rain_ref'],errors='coerce').notna().sum()==0):
+            frame['rain_ref']=frame['rain_water_ref']
+        if 'eto_water_ref' in frame and ('eto_ref' not in frame or pd.to_numeric(frame['eto_ref'],errors='coerce').notna().sum()==0):
+            frame['eto_ref']=frame['eto_water_ref']
+        if 'swc_water_ref' in frame and ('swc_ref' not in frame or pd.to_numeric(frame['swc_ref'],errors='coerce').notna().sum()==0):
+            frame['swc_ref']=frame['swc_water_ref']
+    STATE['phase3']=None
+    STATE['phase4']=None
+    old=STATE.get('metadata') or {}
+    current=STATE.get('data')
+    summary=_summary_from_data(current,source_info=old.get('source') or {},external_info=old.get('external'),project_meta=STATE.get('project') or {},flux_vars=old.get('flux_variables'),biomet_vars=old.get('biomet_variables'))
+    summary['water_input']={'name':Path(path).name,'format':spec.get('format'),'added_variables':added,'timestep_minutes':meta.get('timestep_minutes')}
+    STATE['metadata']=summary
+    return _j({'added_variables':added,'metadata':summary,'source':summary['water_input']})
+
+
+def run_phase3(config_json: str | None = None):
+    source = STATE.get('filled') if STATE.get('filled') is not None else STATE.get('data')
+    if source is None:
+        raise RuntimeError('Load a project first.')
+    config=json.loads(config_json) if isinstance(config_json,str) and config_json else dict(config_json or {})
+    _emit('progress',value=6,message='Preparing energy and water variables')
+    interval,result=run_phase3_analysis(source,STATE.get('project') or {},config)
+    STATE['phase3']={'interval':interval,'result':result,'config':config}
+    # Compact JSON payload for browser rendering.
+    e=result.get('summary',{}).get('energy',{}); w=result.get('summary',{}).get('water',{})
+    daily=result.get('water_daily',pd.DataFrame()); monthly=result.get('energy_monthly',pd.DataFrame())
+    corr=result.get('summary',{}).get('corrections',[])
+    payload={
+      'summary':result.get('summary',{}),
+      'energy_monthly':monthly.where(pd.notna(monthly),None).to_dict(orient='records') if isinstance(monthly,pd.DataFrame) else [],
+      'water_daily':daily.where(pd.notna(daily),None).to_dict(orient='records') if isinstance(daily,pd.DataFrame) else [],
+      'water_monthly':result.get('water_monthly',pd.DataFrame()).where(pd.notna(result.get('water_monthly',pd.DataFrame())),None).to_dict(orient='records') if isinstance(result.get('water_monthly'),pd.DataFrame) else [],
+      'corrections':corr,
+      'plot_energy':result.get('plot_energy',[]),
+    }
+    _emit('progress',value=100,message='Energy and water analysis complete')
+    return _j(payload)
+
+
+def phase3_csv(kind='interval'):
+    p3=STATE.get('phase3')
+    if not p3: return ''
+    r=p3['result']
+    mapping={
+      'interval':r.get('interval'), 'energy_daily':r.get('energy_daily'), 'energy_monthly':r.get('energy_monthly'), 'energy_annual':r.get('energy_annual'),
+      'correction_summary':r.get('correction_summary'), 'correction_daily':r.get('correction_daily'),
+      'water_daily':r.get('water_daily'), 'water_monthly':r.get('water_monthly'), 'water_annual':r.get('water_annual'),
+    }
+    frame=mapping.get(str(kind))
+    return '' if frame is None else frame.to_csv(index=False)
+
+
+def phase3_report_md():
+    p3=STATE.get('phase3')
+    if not p3: return '# FluxGapFill energy and water report\n\nEnergy and water analysis has not been run.\n'
+    return report_markdown(p3['result'],STATE.get('project') or {})
+
+
+
+def load_phase4_geojson(path: str):
+    if not path:
+        STATE['phase4_geojson']=None
+        return _j({'status':'cleared'})
+    text=Path(path).read_text(encoding='utf-8',errors='replace')
+    obj=json.loads(text)
+    if not isinstance(obj,dict) or obj.get('type') not in ('FeatureCollection','Feature'):
+        raise ValueError('AOI file must be GeoJSON FeatureCollection or Feature.')
+    if obj.get('type')=='Feature': obj={'type':'FeatureCollection','features':[obj]}
+    STATE['phase4_geojson']=json.dumps(obj)
+    return _j({'status':'ready','features':len(obj.get('features',[])),'name':Path(path).name})
+
+def run_phase4(config_json: str | None = None):
+    source=STATE.get('filled') if STATE.get('filled') is not None else STATE.get('data')
+    if source is None: raise RuntimeError('Load a project first.')
+    config=json.loads(config_json) if isinstance(config_json,str) and config_json else dict(config_json or {})
+    _emit('progress',value=5,message='Running u*, carbon and footprint analysis')
+    result=run_phase4_analysis(source,STATE.get('project') or {},config,STATE.get('phase4_geojson'))
+    STATE['phase4']={'result':result,'config':config}
+    c=result.get('carbon',{})
+    payload={'ustar':result.get('ustar',{}),'footprint':result.get('footprint',{})}
+    if c.get('status')=='ready':
+        daily=c.get('daily',pd.DataFrame())
+        payload['carbon']={'status':'ready','summary':c.get('summary',{}),'daily':daily.where(pd.notna(daily),None).to_dict(orient='records')}
+    else: payload['carbon']=c
+    _emit('progress',value=100,message='Carbon and footprint analysis complete')
+    return _j(payload)
+
+def phase4_csv(kind='carbon_daily'):
+    p4=STATE.get('phase4')
+    if not p4:return ''
+    r=p4['result']; c=r.get('carbon',{}); f=r.get('footprint',{}); u=r.get('ustar',{})
+    if kind=='carbon_daily' and isinstance(c.get('daily'),pd.DataFrame): return c['daily'].to_csv(index=False)
+    if kind=='carbon_interval' and isinstance(c.get('interval'),pd.DataFrame): return c['interval'].to_csv(index=False)
+    if kind=='ustar_seasonal':
+        return pd.DataFrame([{'season':k,**v} for k,v in (u.get('seasonal') or {}).items()]).to_csv(index=False)
+    if kind=='ustar_bootstrap_summary': return pd.DataFrame([{'method':'MPT',**(u.get('MPT') or {})},{'method':'CPD',**(u.get('CPD') or {})}]).to_csv(index=False)
+    if kind=='footprint_aoi': return pd.DataFrame(f.get('aoi_summary') or []).to_csv(index=False)
+    if kind=='footprint_grid' and f.get('status')=='ready':
+        x=np.asarray(f.get('x'),float); y=np.asarray(f.get('y'),float); z=np.asarray(f.get('z'),float); X,Y=np.meshgrid(x,y)
+        return pd.DataFrame({'east_m':X.ravel(),'north_m':Y.ravel(),'footprint_density_m2':z.ravel()}).to_csv(index=False)
+    return ''
+
+def phase4_report_md():
+    p4=STATE.get('phase4')
+    if not p4:return '# FluxGapFill carbon and footprint report\n\nCarbon and footprint analysis has not been run.\n'
+    return phase4_report(p4['result'],STATE.get('project') or {})
 
 def export_csv(compact=True):
     out = STATE.get('filled') if STATE.get('filled') is not None else STATE.get('data')
@@ -513,8 +682,8 @@ def validation_report_md():
     b = STATE.get('benchmark') or {}
     meta = STATE.get('metadata') or {}
     if not b:
-        return '# FluxGapFill Phase-2 validation report\n\nNo blocked validation has been run.\n'
-    lines = ['# FluxGapFill Phase-2 validation report','',
+        return '# FluxGapFill validation report\n\nNo blocked validation has been run.\n'
+    lines = ['# FluxGapFill validation report','',
              f"Project: **{(STATE.get('project') or {}).get('project_name') or (STATE.get('project') or {}).get('site_name') or 'Untitled'}**", 
              f"Period: {meta.get('start','—')} to {meta.get('end','—')}",
              f"Records: {meta.get('records','—')}",
@@ -534,5 +703,5 @@ def validation_report_md():
     lines += ['', '## Uncertainty note',
               'Where at least 20 blocked-validation residuals are available for a target/model/gap-duration combination, FluxGapFill stores empirical 2.5th and 97.5th percentiles of truth-minus-prediction residuals. These are used as empirical reconstruction intervals in the final product. MDS donor standard deviation is retained separately and is not labelled as a 95% prediction interval.',
               '', '## Reproducibility',
-              'Build: 20260923p2. The detailed, segment and calibration CSV exports contain the exact validation diagnostics used by the adaptive selector.', '']
+              'Build: 20260923p4. The detailed, segment and calibration CSV exports contain the exact validation diagnostics used by the adaptive selector.', '']
     return '\n'.join(lines)

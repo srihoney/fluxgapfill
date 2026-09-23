@@ -41,6 +41,7 @@ CANONICAL_UNITS: Dict[str, str] = {
     "swc": "m3 m-3", "soil_temperature": "degC", "ustar": "m s-1",
     "obukhov_length": "m", "sigma_v": "m s-1", "ET": "mm interval-1",
     "ETo": "mm interval-1", "vp": "kPa", "dew_point": "degC",
+    "irrigation": "mm interval-1", "pbl_height": "m", "wstar": "m s-1",
 }
 
 ROLE_LABELS: Dict[str, str] = {
@@ -55,14 +56,16 @@ ROLE_LABELS: Dict[str, str] = {
     "ustar": "Friction velocity (u*)", "obukhov_length": "Monin-Obukhov length",
     "sigma_v": "Lateral wind SD (sigma-v)", "ET": "Measured ET", "ETo": "Reference ET",
     "vp": "Vapor pressure", "dew_point": "Dew point",
+    "irrigation": "Irrigation / applied water", "pbl_height": "Planetary boundary-layer height",
+    "wstar": "Convective velocity scale (w*)",
 }
 
 ROLE_GROUPS = {
     "Time": ("timestamp", "date", "time"),
     "Fluxes": ("LE", "H", "NEE", "qc_LE", "qc_H", "qc_NEE"),
     "Radiation / energy": ("sr", "rn", "g"),
-    "Meteorology": ("at", "rh", "vpd", "ws", "wind_dir", "rain", "pa", "vp", "dew_point", "ETo"),
-    "Soil / turbulence": ("swc", "soil_temperature", "ustar", "obukhov_length", "sigma_v", "ET"),
+    "Meteorology": ("at", "rh", "vpd", "ws", "wind_dir", "rain", "irrigation", "pa", "vp", "dew_point", "ETo", "pbl_height"),
+    "Soil / turbulence": ("swc", "soil_temperature", "ustar", "obukhov_length", "sigma_v", "wstar", "ET"),
 }
 
 ALIASES: Dict[str, Sequence[str]] = {
@@ -94,6 +97,9 @@ ALIASES: Dict[str, Sequence[str]] = {
     "ETo": ("ETo", "ETo (mm)", "ETo_mm", "ETO", "ET0", "reference_et"),
     "vp": ("VP", "VAPOR_PRESSURE", "Vap Pres (kPa)", "vap_pres", "ea"),
     "dew_point": ("TDEW", "Dew Point (C)", "dew_point", "Tdew"),
+    "irrigation": ("irrigation", "IRRIGATION", "irrigation_mm", "irr_mm", "applied_water", "applied_water_mm", "Irrigation_mm"),
+    "pbl_height": ("pbl_height", "PBLH", "PBL_height", "boundary_layer_height", "mixing_height", "zi", "h_pbl"),
+    "wstar": ("wstar", "w_star", "WSTAR", "convective_velocity_scale"),
 }
 
 # Module readiness is deliberately conservative. Optional modules can be skipped.
@@ -111,8 +117,8 @@ MODULE_REQUIREMENTS = {
     },
     "et_analysis": {
         "label": "ET / water analysis",
-        "all": ["LE"], "any": [], "recommended": ["ETo", "rain", "swc"],
-        "help": "LE is required. ETo, precipitation/irrigation and soil water are optional enhancements.",
+        "all": ["LE"], "any": [], "recommended": ["ETo", "rain", "irrigation", "swc"],
+        "help": "LE is required. ETo, precipitation, irrigation and soil water are optional enhancements.",
     },
     "ustar": {
         "label": "u* threshold analysis",
@@ -126,8 +132,8 @@ MODULE_REQUIREMENTS = {
     },
     "footprint": {
         "label": "Footprint analysis",
-        "all": ["ustar", "wind_dir", "obukhov_length", "measurement_height"], "any": [],
-        "recommended": ["sigma_v", "canopy_height"],
+        "all": ["ustar", "wind_dir", "obukhov_length", "sigma_v", "ws", "measurement_height"], "any": [],
+        "recommended": ["pbl_height", "canopy_height"],
         "help": "Requires turbulence/wind variables plus site geometry. Missing site metadata can be entered manually.",
     },
     "irrigation": {
@@ -165,9 +171,9 @@ def _best_alias(columns: Sequence[str], role: str) -> tuple[Optional[str], float
         "LE": ("latent", "heat"), "H": ("sensible", "heat"), "NEE": ("nee",),
         "sr": ("solar", "rad"), "rn": ("net", "rad"), "g": ("soil", "heat"),
         "at": ("air", "temp"), "rh": ("relative", "hum"), "vpd": ("vpd",),
-        "ws": ("wind", "speed"), "wind_dir": ("wind", "dir"), "rain": ("precip",),
+        "ws": ("wind", "speed"), "wind_dir": ("wind", "dir"), "rain": ("precip",), "irrigation": ("irrig",),
         "pa": ("pressure",), "swc": ("soil", "water"), "soil_temperature": ("soil", "temp"),
-        "ustar": ("ustar",), "ETo": ("eto",), "vp": ("vapor", "pres"), "dew_point": ("dew",),
+        "ustar": ("ustar",), "ETo": ("eto",), "vp": ("vapor", "pres"), "dew_point": ("dew",), "pbl_height": ("pbl",), "wstar": ("wstar",),
     }.get(role, ())
     if role_tokens:
         for c in columns:
@@ -422,15 +428,23 @@ def _parse_timestamp(values: pd.Series) -> pd.Series:
     return out
 
 
-def _build_datetime(raw: pd.DataFrame, mapping: Mapping[str, dict]) -> pd.Series:
+def _build_datetime(raw: pd.DataFrame, mapping: Mapping[str, dict], allow_date_only: bool = False) -> pd.Series:
     ts_col = (mapping.get("timestamp") or {}).get("column")
     if ts_col and ts_col in raw:
         return _parse_timestamp(raw[ts_col])
     date_col = (mapping.get("date") or {}).get("column")
     time_col = (mapping.get("time") or {}).get("column")
-    if not date_col or date_col not in raw or not time_col or time_col not in raw:
-        raise ValueError("Map either one Timestamp column or both Date and Time columns.")
+    if not date_col or date_col not in raw:
+        raise ValueError("Map either one Timestamp column or a Date column (Date+Time for sub-daily files).")
     dates = pd.to_datetime(raw[date_col], errors="coerce").dt.normalize()
+    if not time_col or time_col not in raw:
+        if not allow_date_only:
+            raise ValueError("Map either one Timestamp column or both Date and Time columns.")
+        # Date-only supplemental tables (commonly daily irrigation totals) are
+        # represented at local noon so the record stays attached to its
+        # calendar date during alignment. The water-file loader forces midpoint
+        # convention for this date-only case.
+        return dates + pd.Timedelta(hours=12)
     times = _parse_time_like(raw[time_col])
     result = pd.Series(pd.NaT, index=raw.index, dtype="datetime64[ns]")
     for i in raw.index:
@@ -471,14 +485,14 @@ def _convert(values: pd.Series, role: str, unit: str, step: pd.Timedelta) -> tup
         if compact in {"kpa"}: return v, "no conversion"
         if compact in {"pa","pascal","pascals"}: return v/1000.0, "Pa to kPa"
         if compact in {"hpa","mbar","mb"}: return v/10.0, "hPa/mbar to kPa"
-    if role in {"ws","ustar","sigma_v"}:
+    if role in {"ws","ustar","sigma_v","wstar"}:
         if compact in {"ms-1","m/s","ms","msec-1"}: return v, "no conversion"
         if compact in {"mph"}: return v*0.44704, "mph to m s-1"
         if compact in {"kmh-1","km/h","kmph"}: return v/3.6, "km h-1 to m s-1"
     if role == "wind_dir":
         if compact in {"deg","degree","degrees","0-360"}: return v % 360.0, "normalized degrees"
         if compact in {"rad","radian","radians"}: return np.rad2deg(v) % 360.0, "radians to degrees"
-    if role in {"rain","ET","ETo"}:
+    if role in {"rain","irrigation","ET","ETo"}:
         if compact in {"mm","mminterval-1","mminterval","mmrecord-1"}: return v, "no conversion"
         if compact in {"in","inch","inches","ininterval-1"}: return v*25.4, "inch to mm"
         hours=float(step/pd.Timedelta(hours=1))
@@ -490,7 +504,7 @@ def _convert(values: pd.Series, role: str, unit: str, step: pd.Timedelta) -> tup
     if role == "NEE":
         if compact in {"umolm-2s-1","µmolm-2s-1","micromolm-2s-1","umolm2s","µmolm2s","umolm2s-1"}: return v, "no conversion"
         if compact in {"mgco2m-2s-1","mgco2m2s-1"}: return v*(1000.0/44.0095), "mg CO2 to umol CO2"
-    if role == "obukhov_length" and compact in {"m","meter","metre"}: return v, "no conversion"
+    if role in {"obukhov_length","pbl_height"} and compact in {"m","meter","metre"}: return v, "no conversion"
     # Permit canonical unit spellings.
     expected = _unit_key(CANONICAL_UNITS.get(role, ""))
     if compact == re.sub(r"[\s_^/()]", "", expected): return v, "no conversion"
@@ -513,6 +527,9 @@ def _apply_physical(values: pd.Series, role: str) -> tuple[pd.Series, pd.Series]
     if role == "wind_dir": lim = (0.0, 360.0)
     if role == "ustar": lim = (0.0, 10.0)
     if role == "obukhov_length": lim = (-100000.0, 100000.0)
+    if role == "pbl_height": lim = (1.0, 10000.0)
+    if role == "wstar": lim = (0.0, 20.0)
+    if role == "irrigation": lim = (0.0, 1000.0)
     if role == "sigma_v": lim = (0.0, 50.0)
     if role in {"vp"}: lim = (0.0, 15.0)
     if role in {"dew_point"}: lim = (-80.0, 70.0)
@@ -533,12 +550,23 @@ def _mapping_payload(mapping: Mapping[str, object]) -> Dict[str, dict]:
 def read_mapped_file(path: str, mapping: Mapping[str, object], config: Mapping[str, object], fmt: Optional[str]=None) -> tuple[pd.DataFrame, dict]:
     mapping = _mapping_payload(mapping)
     raw, declared_units, meta = _read_table(path, fmt=fmt, nrows=None)
-    dt_input = _build_datetime(raw, mapping)
+    dt_input = _build_datetime(raw, mapping, allow_date_only=bool(config.get("allow_long_timestep", False)))
     good = dt_input.notna()
     if good.sum() < 3:
         raise ValueError("Fewer than three valid timestamps were found after applying the mapping.")
     raw = raw.loc[good].reset_index(drop=True); dt_input = dt_input.loc[good].reset_index(drop=True)
-    step = infer_timestep(dt_input)
+    try:
+        step = infer_timestep(dt_input)
+    except ValueError:
+        if not bool(config.get("allow_long_timestep", False)):
+            raise
+        ts = pd.DatetimeIndex(pd.to_datetime(dt_input, errors="coerce")).dropna().sort_values().unique()
+        diffs = pd.Series(ts[1:] - ts[:-1]); diffs = diffs[diffs > pd.Timedelta(0)]
+        if diffs.empty:
+            raise ValueError("Could not infer a positive timestep for the supplemental file.")
+        mode = diffs.mode(); step = mode.iloc[0] if not mode.empty else diffs.median()
+        if step < pd.Timedelta(minutes=5) or step > pd.Timedelta(days=31):
+            raise ValueError(f"Unsupported supplemental timestep: {step}.")
     convention = str(config.get("timestamp_convention") or "midpoint")
     time_basis = str(config.get("time_basis") or "local_standard")
     timezone = str(config.get("timezone") or "America/Los_Angeles")
@@ -581,7 +609,7 @@ def read_mapped_file(path: str, mapping: Mapping[str, object], config: Mapping[s
         ag={}
         for c in out.columns:
             if c=="datetime": continue
-            if c in {"rain","ET","ETo"}: ag[c]="sum"
+            if c in {"rain","irrigation","ET","ETo"}: ag[c]="sum"
             elif pd.api.types.is_numeric_dtype(out[c]): ag[c]="mean"
             else: ag[c]="first"
         out=out.groupby("datetime",as_index=False).agg(ag)
@@ -606,9 +634,16 @@ def align_supplemental(source: pd.DataFrame, target: pd.DataFrame) -> pd.DataFra
     if len(source)<2 or len(target)<2: return pd.DataFrame({"datetime":target["datetime"]})
     s=source.copy(); s["datetime"]=pd.to_datetime(s["datetime"]); s=s.set_index("datetime").sort_index()
     tindex=pd.DatetimeIndex(pd.to_datetime(target["datetime"]))
-    target_step=infer_timestep(tindex); source_step=infer_timestep(s.index)
+    target_step=infer_timestep(tindex)
+    try:
+        source_step=infer_timestep(s.index)
+    except ValueError:
+        diffs=pd.Series(pd.DatetimeIndex(s.index).sort_values().unique()[1:] - pd.DatetimeIndex(s.index).sort_values().unique()[:-1])
+        diffs=diffs[diffs>pd.Timedelta(0)]
+        if diffs.empty: return pd.DataFrame({"datetime":target["datetime"]})
+        mode=diffs.mode(); source_step=mode.iloc[0] if not mode.empty else diffs.median()
     result=pd.DataFrame(index=tindex)
-    totals={"rain","ET","ETo"}
+    totals={"rain","irrigation","ET","ETo"}
     for col in [c for c in s.columns if c not in {"datetime_input"} and not c.endswith(("_raw","_input_qc")) and "screen_flag" not in c]:
         vals=pd.to_numeric(s[col],errors="coerce")
         if vals.notna().sum()<2: continue
