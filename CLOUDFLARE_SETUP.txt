@@ -1,0 +1,14 @@
+Cloudflare Pages settings
+=========================
+Project name: fluxgapfill
+Production branch: main
+Framework preset: None
+Build command: exit 0
+Build output directory: public
+Root directory: [blank]
+
+Expected URL if name is available:
+https://fluxgapfill.pages.dev/
+
+Deployment check:
+https://fluxgapfill.pages.dev/deployment-check.html
