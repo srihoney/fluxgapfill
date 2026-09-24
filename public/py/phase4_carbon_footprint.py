@@ -181,5 +181,5 @@ def run_phase4_analysis(df,project,config,geojson=None):
     return {'ustar':u,'carbon':c,'footprint':f}
 
 def phase4_report(result,project):
-    u=result.get('ustar',{});c=result.get('carbon',{});f=result.get('footprint',{});lines=['# FluxGapFill Phase-4 report','',f"Project: **{project.get('project_name') or project.get('site_name') or 'Untitled'}**",'',f"u* status: {u.get('status')}",f"Selected u*: {u.get('selected_threshold')}",f"Carbon status: {c.get('status')}",f"Footprint status: {f.get('status')}",'','Methods: independent MPT/CPD-style threshold implementations; Reichstein-style nighttime Lloyd–Taylor carbon partitioning; Kljun et al. (2015) FFP footprint parameterisation.','']
+    u=result.get('ustar',{});c=result.get('carbon',{});f=result.get('footprint',{});lines=['# FluxGapFill Carbon and Footprint Report','',f"Project: **{project.get('project_name') or project.get('site_name') or 'Untitled'}**",'',f"u* status: {u.get('status')}",f"Selected u*: {u.get('selected_threshold')}",f"Carbon status: {c.get('status')}",f"Footprint status: {f.get('status')}",'','Methods: independent MPT/CPD-style threshold implementations; Reichstein-style nighttime Lloyd–Taylor carbon partitioning; Kljun et al. (2015) FFP footprint parameterisation.','']
     return '\n'.join(lines)

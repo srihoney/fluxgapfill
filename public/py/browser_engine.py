@@ -204,7 +204,7 @@ def load_universal_project(primary_path: str, primary_spec_json: str,
     _emit('progress', value=72, message='Computing project capabilities and data-quality diagnostics')
     # Mirror primary ETo/rain variables into names used by water-analysis readiness when present.
     summary=_summary_from_data(data,source_info=source_info,external_info=external_info,project_meta=project,flux_vars=flux_vars,biomet_vars=biomet_vars)
-    STATE['data_imported']=data.copy(); STATE['data']=data.copy(); STATE['metadata']=summary; STATE['benchmark']=None; STATE['filled']=None; STATE['project']=project; STATE['qc_audit']=None; STATE['qc_summary']=None; STATE['phase3']=None
+    STATE['data_imported']=data.copy(); STATE['data']=data.copy(); STATE['metadata']=summary; STATE['benchmark']=None; STATE['filled']=None; STATE['project']=project; STATE['qc_audit']=None; STATE['qc_summary']=None; STATE['phase3']=None; STATE['phase4']=None
     _emit('progress', value=100, message='Project dataset ready')
     return _j(summary)
 
@@ -246,6 +246,7 @@ def run_qc(config_json: str | None = None):
     STATE['benchmark'] = None
     STATE['filled'] = None
     STATE['phase3'] = None
+    STATE['phase4'] = None
     old = STATE.get('metadata') or {}
     summary = _summary_from_data(
         screened,
@@ -261,7 +262,7 @@ def run_qc(config_json: str | None = None):
         'plot': _downsample(screened, ['LE','H','NEE','LE_pre_phase2_qc','H_pre_phase2_qc','NEE_pre_phase2_qc']),
     }
     STATE['metadata'] = summary
-    _emit('progress', value=100, message='Phase-2 QC complete')
+    _emit('progress', value=100, message='Quality control complete')
     return _j(summary)
 
 
@@ -547,8 +548,7 @@ def add_water_input_file(path: str, spec_json: str, timestamp_convention: str = 
             frame['eto_ref']=frame['eto_water_ref']
         if 'swc_water_ref' in frame and ('swc_ref' not in frame or pd.to_numeric(frame['swc_ref'],errors='coerce').notna().sum()==0):
             frame['swc_ref']=frame['swc_water_ref']
-    STATE['phase3']=None
-    STATE['phase4']=None
+    STATE['phase3']=None; STATE['phase4']=None
     old=STATE.get('metadata') or {}
     current=STATE.get('data')
     summary=_summary_from_data(current,source_info=old.get('source') or {},external_info=old.get('external'),project_meta=STATE.get('project') or {},flux_vars=old.get('flux_variables'),biomet_vars=old.get('biomet_variables'))

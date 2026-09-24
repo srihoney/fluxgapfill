@@ -1,27 +1,16 @@
-FluxGapFill 1.0 — GitHub + Cloudflare Pages
-Build: 20260923v100
-Target: https://fluxgapfill.pages.dev/
+FluxGapFill — static deployment
+Build: 20260924workspace
 
-Use the existing Cloudflare Pages project. Do not create a new project if fluxgapfill already exists.
-
-1. Replace the contents of the GitHub repository with the contents of this package.
-2. Commit/push to the production branch (normally main).
-3. Keep these Cloudflare Pages settings:
-
-   Project name: fluxgapfill
-   Production branch: main
-   Framework preset: None
+1. Extract the ZIP. Copy the contents of fluxgapfill-main into the existing repository root.
+2. Commit and push to the production branch.
+3. Existing Cloudflare Pages configuration:
+   Framework: None
    Build command: exit 0
    Build output directory: public
    Root directory: blank
+4. Check /deployment-check.html for build 20260924workspace.
+5. Open the main page, load the example and inspect its mapping.
 
-4. After deployment open:
-   https://fluxgapfill.pages.dev/deployment-check.html
+No backend server, API key or npm build is required. Python scientific packages load from a CDN in the browser. The existing live site has not been changed by this package delivery.
 
-Expected:
-   FluxGapFill 1.0
-   Build 20260923v100
-
-5. Open the main site and use Ctrl+F5 once after the first deployment of this release.
-
-If Cloudflare shows "This project is disconnected from your Git account", reconnect the Cloudflare Workers and Pages GitHub app to the repository before expecting automatic future deployments.
+Feedback: speddinti@ucdavis.edu

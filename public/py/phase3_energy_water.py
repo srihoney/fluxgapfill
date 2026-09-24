@@ -385,7 +385,7 @@ def _water_summaries(interval: pd.DataFrame, config: Mapping[str,object]):
             diff=derived[ok]-measured_et[ok]; compare["bias_mm_interval"]=_safe(diff.mean()); compare["rmse_mm_interval"]=_safe(np.sqrt(np.mean(diff**2)))
     meta={"temperature_source":tcol,"temperature_fallback_used":fallback_used,"daily_coverage_threshold_pct":threshold,"expected_intervals_per_day":expected,"ETo_source":etocol,"rain_source":raincol,"irrigation_source":irrcol,"SWC_source":swccol,"input_ET_comparison":compare,
           "water_balance_note":"Water input minus ET is a simple diagnostic only; it does not account for runoff, drainage, lateral flow or soil-water storage change.",
-          "uncertainty_note":"ET bounds derived from Phase-2 empirical LE residual intervals represent gap-reconstruction uncertainty only, not total EC measurement uncertainty."}
+          "uncertainty_note":"ET bounds derived from empirical LE residual intervals represent gap-reconstruction uncertainty only, not total EC measurement uncertainty."}
     return interval,daily,monthly,annual,meta
 
 
@@ -488,7 +488,7 @@ def run_phase3_analysis(data: pd.DataFrame, project_meta: Optional[Mapping[str,o
 
 def report_markdown(result: Mapping[str,object], project: Optional[Mapping[str,object]]=None) -> str:
     project=dict(project or {}); s=result.get("summary",{}); e=s.get("energy",{}); w=s.get("water",{})
-    lines=["# FluxGapFill Phase-3 Energy + Water/ET Report","",f"Project: **{project.get('project_name') or project.get('site_name') or 'Untitled'}**","",
+    lines=["# FluxGapFill Energy and Water Report","",f"Project: **{project.get('project_name') or project.get('site_name') or 'Untitled'}**","",
            "## Energy-balance diagnostics","",f"Status: **{e.get('status','unknown')}**",f"Net radiation source: `{e.get('rn_source')}`",f"Ground heat flux mode: `{(e.get('g') or {}).get('mode','unavailable')}`",""]
     m=e.get("measured_primary") or {}
     if m:
